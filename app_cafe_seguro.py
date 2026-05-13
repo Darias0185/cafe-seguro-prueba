@@ -1,6 +1,6 @@
 # ============================================================
-# CAFÉ SEGURO — APP STREAMLIT v3
-# Fixes: sin CSS/HTML crudo, cobertura corregida, botón → checkbox
+# CAFÉ SEGURO — App Streamlit v4
+# Calculadora del caficultor + Historial de Caldas
 # ============================================================
 
 import streamlit as st
@@ -15,39 +15,68 @@ st.set_page_config(
     page_title="Café Seguro · Caldas",
     page_icon="🌿",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 # ── CONSTANTES ────────────────────────────────────────────────
-SUMA_HA      = 1_800_000
-HECTAREAS    = 20_000
-U9_OPT       = -0.70
-U6_OPT       = -0.094
-EXIT_SPI6    = -2.0
-VERDE_MED    = "#2C5F2D"
-ROJO         = "#C0392B"
-AMBAR        = "#B8620A"
-VERDE_P      = "#1A6E3A"
-GRIS         = "#6B7F70"
+SUMA_HA   = 1_800_000
+HECTAREAS = 20_000
+U9_OPT    = -0.70
+U6_OPT    = -0.094
+EXIT_SPI6 = -2.0
 
 MESES = {1:"Enero",2:"Febrero",3:"Marzo",4:"Abril",5:"Mayo",6:"Junio",
          7:"Julio",8:"Agosto",9:"Septiembre",10:"Octubre",
          11:"Noviembre",12:"Diciembre"}
+
+VERDE_M = "#2C5F2D"
+ROJO    = "#C0392B"
+AMBAR   = "#B8620A"
+GRIS    = "#6B7F70"
+
+# Percentiles históricos por mes (precalculados del dataset)
+PRECIP_PCT = {
+    1:(110.3,163.0,185.9), 2:(137.4,144.9,218.8), 3:(206.9,250.6,301.0),
+    4:(268.5,293.6,336.1), 5:(273.8,305.1,351.8), 6:(150.5,214.2,263.3),
+    7:(120.5,147.0,212.6), 8:(157.5,194.2,231.9), 9:(222.5,240.7,271.3),
+    10:(324.6,337.8,354.2),11:(278.8,308.2,343.0),12:(178.3,194.8,244.0),
+}
+NDVI_PCT = {
+    1:(0.743,0.777,0.793), 2:(0.704,0.742,0.764), 3:(0.701,0.726,0.754),
+    4:(0.707,0.738,0.761), 5:(0.752,0.780,0.794), 6:(0.773,0.794,0.799),
+    7:(0.765,0.781,0.795), 8:(0.745,0.760,0.777), 9:(0.731,0.754,0.774),
+    10:(0.617,0.660,0.708),11:(0.672,0.727,0.757),12:(0.727,0.768,0.789),
+}
+PROD_HIST = {
+    1:88.8,2:80.4,3:69.7,4:71.8,5:86.0,6:87.2,
+    7:82.9,8:75.4,9:69.0,10:90.6,11:105.4,12:105.8,
+}
+PROD_POR_LLUVIA = {
+    1:(73.0,92.0,82.8),  2:(86.0,77.5,75.1),  3:(68.6,67.8,68.9),
+    4:(61.9,71.4,61.6),  5:(82.0,77.8,84.7),  6:(89.6,82.3,82.6),
+    7:(81.8,88.3,73.8),  8:(86.0,69.2,74.5),  9:(57.0,77.8,67.5),
+    10:(87.6,87.0,90.7), 11:(99.3,109.2,92.1), 12:(86.1,111.1,109.6),
+}
+SPI9_BASE = {
+    1:-0.079,2:-0.095,3:-0.028,4:-0.012,5:0.017,6:0.111,
+    7:0.084, 8:0.054, 9:-0.067,10:-0.038,11:0.010,12:-0.038,
+}
+SPI6_BASE = {
+    1:-0.077,2:-0.080,3:0.106,4:0.093,5:0.067,6:0.051,
+    7:0.036, 8:0.061, 9:-0.129,10:-0.100,11:-0.054,12:-0.058,
+}
+SPI_DELTA = {"Poca lluvia": -0.80, "Lluvia normal": 0.0, "Mucha lluvia": +0.70}
 
 def fmt_cop(v):
     if v >= 1e9:  return f"${v/1e9:.1f} MM"
     if v >= 1e6:  return f"${v/1e6:.0f} M"
     return f"${v:,.0f}"
 
-def pago_hibrido(spi9, spi6, u9, u6, exit6=EXIT_SPI6):
-    if spi9 > u9 or spi6 > u6: return 0.0
-    return float(np.clip((spi6 - u6) / (exit6 - u6), 0, 1))
+def pago_hibrido(spi9, spi6):
+    if spi9 > U9_OPT or spi6 > U6_OPT: return 0.0
+    return float(np.clip((spi6 - U6_OPT) / (EXIT_SPI6 - U6_OPT), 0, 1))
 
-def estado_label(pago, sequia):
-    if pago > 0 and sequia == 1:  return "✅ Pagó",              VERDE_P
-    if pago > 0 and sequia == 0:  return "⚠️ Falso positivo",    AMBAR
-    if pago == 0 and sequia == 1: return "🚨 Pérdida sin pago",  ROJO
-    return "⬜ Normal",            GRIS
+def mes_ant(m, n=1): return ((m - 1 - n) % 12) + 1
 
 # ── CARGA ─────────────────────────────────────────────────────
 @st.cache_data
@@ -57,7 +86,7 @@ def cargar():
     dm = dm.sort_values('fecha').reset_index(drop=True)
 
     COLS = ['departamento','fecha','spi_6','spi_9','cat_oficial_spi_9',
-            'pago_spi_mejor','pago_spi_6','pago_spi_9','evento_sequia_conocido']
+            'pago_spi_mejor','evento_sequia_conocido']
     ds = (pd.read_csv("resultado_spi_multiescala_pago.csv", usecols=COLS)
           .assign(fecha=lambda x: pd.to_datetime(x['fecha']))
           .query("departamento=='Caldas'")
@@ -83,403 +112,387 @@ def cargar():
     df['prod_estimada_rf']  = np.nan
     df.loc[mask, 'prod_estimada_rf'] = dfm['prod_estimada_rf'].values
 
-    ph = (df[df['fecha'].dt.year <= 2018]
+    ph = (df[df['fecha'].dt.year<=2018]
           .groupby('month')['prod_caldas_miles_sacos'].mean()
           .rename('prod_hist_mensual'))
     df = df.merge(ph, on='month', how='left')
-    df['var_obs']  = ((df['prod_caldas_miles_sacos'] - df['prod_hist_mensual'])
-                      / df['prod_hist_mensual'] * 100).round(1)
-    df['var_est']  = ((df['prod_estimada_rf'] - df['prod_hist_mensual'])
-                      / df['prod_hist_mensual'] * 100).round(1)
-    df['pago_cop'] = (df['pago_spi_mejor'] * SUMA_HA * HECTAREAS).round(0)
-    return df
+    df['var_obs']  = ((df['prod_caldas_miles_sacos']-df['prod_hist_mensual'])
+                      / df['prod_hist_mensual']*100).round(1)
+    df['pago_cop'] = (df['pago_spi_mejor']*SUMA_HA*HECTAREAS).round(0)
+    return df, model, FC
 
 with st.spinner("Cargando datos y modelo..."):
-    df = cargar()
-
-anios = sorted(df['fecha'].dt.year.unique())
-
-# ════════════════════════════════════════════════════════════
-# SIDEBAR
-# ════════════════════════════════════════════════════════════
-with st.sidebar:
-    st.markdown("## 🌿 Café Seguro")
-    st.caption("Seguro indexado · Caldas")
-    st.divider()
-    st.markdown("**CONSULTA**")
-    st.selectbox("Departamento", ["Caldas"])
-    anio_sel = st.selectbox("Año",  anios, index=anios.index(2020))
-    meses_d  = sorted(df[df['fecha'].dt.year == anio_sel]['fecha'].dt.month.unique())
-    mes_sel  = st.selectbox("Mes", meses_d,
-                             format_func=lambda m: MESES[m],
-                             index=min(3, len(meses_d) - 1))
-    st.divider()
-    ult = df.dropna(subset=['spi_9']).iloc[-1]
-    st.markdown(f"**Riesgo actual · {ult['fecha'].strftime('%b %Y')}**")
-    st.metric("SPI-9", f"{ult['spi_9']:+.2f}", ult['cat_oficial_spi_9'])
-    st.divider()
-    st.markdown("**Contrato de referencia**")
-    st.markdown("Suma asegurada / ha: **$1.8 M COP**")
-    st.markdown("Prima estimada: **$42 k / mes**")
-    st.caption("Fuente: FNC · CHIRPS · NASA MODIS\nModelo: Random Forest M4")
-
-# ── DATOS DEL MES ─────────────────────────────────────────────
-fila = df[(df['fecha'].dt.year == anio_sel) & (df['fecha'].dt.month == mes_sel)]
-if fila.empty:
-    st.warning("Sin datos para el mes seleccionado.")
-    st.stop()
-
-r         = fila.iloc[0]
-pago_pct  = float(r['pago_spi_mejor'])
-prod_real = float(r['prod_caldas_miles_sacos'])
-prod_hist = float(r['prod_hist_mensual'])
-var_obs   = float(r['var_obs'])
-spi9      = float(r['spi_9'])
-spi6      = float(r['spi_6'])
-pago_cop  = float(r['pago_cop'])
-nivel     = str(r['cat_oficial_spi_9'])
-sequia    = int(r['evento_sequia_conocido'])
-est_txt, est_color = estado_label(pago_pct, sequia)
-
-# Pago máximo posible = 100% de la suma asegurada total
-pago_maximo = SUMA_HA * HECTAREAS
-# Cobertura = qué % del pago máximo se activó
-pct_suma_asegurada = pago_pct * 100   # e.g. 67.7%
+    df, modelo, FC = cargar()
 
 # ════════════════════════════════════════════════════════════
 # HEADER
 # ════════════════════════════════════════════════════════════
-st.markdown("### 🌿 Seguro indexado café · Caldas")
-st.caption(f"Departamento: Caldas  ·  Periodo de análisis: 2002–2025")
+st.markdown("### 🌿 Café Seguro · Caldas")
+st.caption("Herramienta de consulta para el caficultor · Caldas, Colombia")
 st.divider()
 
-# ════════════════════════════════════════════════════════════
-# SECCIÓN 1 — RESPUESTA PRINCIPAL
-# ════════════════════════════════════════════════════════════
-st.markdown(f"**1. Respuesta principal — {MESES[mes_sel]} {anio_sel}**")
-c1, c2, c3 = st.columns(3)
-
-with c1:
-    st.markdown("##### 📉 Afectación del cultivo")
-    ca, cb = st.columns(2)
-    ca.metric("Prod. esperada (hist.)",
-              f"{prod_hist:.0f} k sacos")
-    cb.metric("Prod. observada",
-              f"{prod_real:.0f} k sacos",
-              delta=f"{var_obs:+.1f}%",
-              delta_color="normal" if var_obs >= 0 else "inverse")
-
-with c2:
-    st.markdown("##### 🛡️ ¿El seguro respondió?")
-    # Estado con color usando st.markdown mínimo
-    estado_icon = "🟢" if "Pagó" in est_txt else ("🔴" if "sin pago" in est_txt else "🟡")
-    st.markdown(f"**Estado:** {est_txt}")
-    ce, cf = st.columns(2)
-    ce.metric("Pago estimado", fmt_cop(pago_cop))
-    cf.metric("% Suma asegurada", f"{pct_suma_asegurada:.1f}%",
-              delta=f"de ${pago_maximo/1e9:.1f} MM máximo")
-
-with c3:
-    st.markdown("##### ⭐ Evaluación del sistema")
-    if pago_pct > 0 and var_obs < 0:
-        st.info(f"El seguro activó con **{pct_suma_asegurada:.1f}%** de la suma asegurada.\n\n"
-                f"La producción cayó **{abs(var_obs):.1f}%** respecto al histórico.")
-    elif pago_pct > 0 and var_obs >= 0:
-        st.warning("El seguro pagó sin caída productiva significativa.")
-    elif sequia == 1 and pago_pct == 0:
-        st.error("Sequía real confirmada pero el seguro **no activó** (falso negativo).")
-    else:
-        st.success("Mes sin afectación relevante.")
-    cg, ch = st.columns(2)
-    cg.metric("Pago total", fmt_cop(pago_cop) if pago_pct > 0 else "—")
-    ch.metric("SPI-9", f"{spi9:+.3f}", nivel)
-
-st.divider()
+tab1, tab2 = st.tabs(["☕  Calculadora", "📊  Historial de Caldas"])
 
 # ════════════════════════════════════════════════════════════
-# SECCIÓN 2 + 3
+# PESTAÑA 1 — CALCULADORA
 # ════════════════════════════════════════════════════════════
-col_prod, col_spi = st.columns([6, 4])
+with tab1:
 
-with col_prod:
-    st.markdown("**2. Producción observada vs. esperada**")
+    col_form, col_result = st.columns([1, 2], gap="large")
 
-    yr_min = int(df['fecha'].dt.year.min())
-    yr_max = int(df['fecha'].dt.year.max())
-    rango = st.select_slider(
-        "Periodo del gráfico", label_visibility="collapsed",
-        options=list(range(yr_min, yr_max + 1)),
-        value=(max(yr_min, anio_sel - 4), min(yr_max, anio_sel + 2)))
+    with col_form:
+        st.markdown("#### ¿Qué quiere consultar?")
 
-    dg = df[(df['fecha'].dt.year >= rango[0]) &
-            (df['fecha'].dt.year <= rango[1])].dropna(subset=['prod_estimada_rf']).copy()
+        mes_sel = st.selectbox(
+            "Mes a consultar",
+            options=list(range(1, 13)),
+            format_func=lambda m: MESES[m],
+            index=10,
+        )
+        lluvia_sel = st.radio(
+            "¿Cómo estuvo la lluvia?",
+            ["Poca lluvia", "Lluvia normal", "Mucha lluvia"],
+            index=1,
+        )
+        vigor_sel = st.radio(
+            "¿Cómo está la vegetación de su finca?",
+            ["Vegetación baja", "Vegetación normal", "Vegetación alta"],
+            index=1,
+        )
 
-    fig = go.Figure()
-    dg['caida'] = dg['prod_caldas_miles_sacos'] < dg['prod_estimada_rf']
-    grp = (dg['caida'] != dg['caida'].shift()).cumsum()
-    for _, b in dg[dg['caida']].groupby(grp[dg['caida']]):
-        fig.add_trace(go.Scatter(
-            x=list(b['fecha']) + list(b['fecha'][::-1]),
-            y=list(b['prod_estimada_rf']) + list(b['prod_caldas_miles_sacos'][::-1]),
-            fill='toself', fillcolor='rgba(192,57,43,0.12)',
-            line=dict(width=0), showlegend=False, hoverinfo='skip'))
+        st.button("🔍 Consultar", type="primary", use_container_width=True)
 
-    fig.add_trace(go.Scatter(
-        x=dg['fecha'], y=dg['prod_estimada_rf'],
-        name='Prod. esperada (RF)',
-        line=dict(color=VERDE_MED, width=2, dash='dash'),
-        hovertemplate='%{x|%b %Y}<br>Esperada: <b>%{y:.1f}</b> k sacos<extra></extra>'))
-    fig.add_trace(go.Scatter(
-        x=dg['fecha'], y=dg['prod_caldas_miles_sacos'],
-        name='Prod. real',
-        line=dict(color=ROJO, width=2),
-        hovertemplate='%{x|%b %Y}<br>Real: <b>%{y:.1f}</b> k sacos<extra></extra>'))
+        st.info(
+            "Estimación de referencia departamental para Caldas. "
+            "No reemplaza el dato real de su finca ni constituye "
+            "una liquidación oficial del seguro.",
+            icon="ℹ️",
+        )
 
-    sv = dg[(dg['fecha'].dt.year == anio_sel) & (dg['fecha'].dt.month == mes_sel)]
-    if not sv.empty:
-        s = sv.iloc[0]
-        fig.add_trace(go.Scatter(
-            x=[s['fecha']], y=[s['prod_caldas_miles_sacos']],
-            mode='markers',
-            marker=dict(color=ROJO, size=12, line=dict(color='white', width=2)),
-            name='Mes seleccionado'))
-        fig.add_vline(x=s['fecha'].timestamp() * 1000,
-                      line=dict(color=GRIS, width=1, dash='dot'))
+    with col_result:
 
-    fig.update_layout(
-        height=260, margin=dict(l=0, r=0, t=4, b=0),
-        plot_bgcolor='white', paper_bgcolor='white',
-        legend=dict(orientation='h', yanchor='bottom', y=1.02, x=0, font=dict(size=10)),
-        xaxis=dict(showgrid=False, tickformat='%Y'),
-        yaxis=dict(title='Miles de sacos', gridcolor='#E8EDE9'),
-        hovermode='x unified', font=dict(size=11))
-    st.plotly_chart(fig, use_container_width=True)
-    st.warning("⚠️ **Nota:** Las caídas por exceso hídrico (SPI positivo) no activan el seguro "
-               "— limitación estructural del índice SPI documentada en el análisis.")
+        # ── CÁLCULO ───────────────────────────────────────────
+        ll_idx = {"Poca lluvia":0,"Lluvia normal":1,"Mucha lluvia":2}[lluvia_sel]
+        vg_idx = {"Vegetación baja":0,"Vegetación normal":1,"Vegetación alta":2}[vigor_sel]
 
-with col_spi:
-    st.markdown("**3. Condiciones climáticas (SPI)**")
-    activa9 = spi9 <= U9_OPT
-    activa6 = spi6 <= U6_OPT
+        precip_val = PRECIP_PCT[mes_sel][ll_idx]
+        ndvi_val   = NDVI_PCT[mes_sel][vg_idx]
+        prod_hist  = PROD_HIST[mes_sel]
 
-    st.metric(
-        label=f"Persistencia — SPI-9  {'✅ ACTIVA' if activa9 else '⬜ no activa'}",
-        value=f"{spi9:+.3f}",
-        delta=f"umbral ≤ {U9_OPT}",
-        delta_color="inverse" if activa9 else "off")
+        features = {
+            'prod_lag1'   : PROD_HIST[mes_ant(mes_sel, 1)],
+            'prod_lag2'   : PROD_HIST[mes_ant(mes_sel, 2)],
+            'prod_lag3'   : PROD_HIST[mes_ant(mes_sel, 3)],
+            'prod_lag6'   : PROD_HIST[mes_ant(mes_sel, 6)],
+            'prod_lag12'  : prod_hist,
+            'precip_lag1' : precip_val,
+            'precip_lag3' : PRECIP_PCT[mes_ant(mes_sel, 3)][1],
+            'precip_lag6' : PRECIP_PCT[mes_ant(mes_sel, 6)][1],
+            'precip_lag10': PRECIP_PCT[mes_ant(mes_sel, 10)][1],
+            'ndvi_lag1'   : ndvi_val,
+            'ndvi_lag3'   : NDVI_PCT[mes_ant(mes_sel, 3)][1],
+            'ndvi_lag5'   : NDVI_PCT[mes_ant(mes_sel, 5)][1],
+            'mes_sin'     : np.sin(2*np.pi*mes_sel/12),
+            'mes_cos'     : np.cos(2*np.pi*mes_sel/12),
+            'tendencia'   : 264,
+        }
 
-    st.metric(
-        label=f"Intensidad — SPI-6  {'✅ Determina pago' if (activa9 and activa6) else '⬜ sin intensidad'}",
-        value=f"{spi6:+.3f}",
-        delta=f"umbral ≤ {U6_OPT}  |  exit {EXIT_SPI6}",
-        delta_color="inverse" if (activa9 and activa6) else "off")
+        X_pred       = pd.DataFrame([features])[FC]
+        prod_est     = round(float(modelo.predict(X_pred)[0]), 1)
+        diff_pct     = round((prod_est - prod_hist) / prod_hist * 100, 1)
+        delta_spi    = SPI_DELTA[lluvia_sel]
+        spi9_est     = round(SPI9_BASE[mes_sel] + delta_spi, 3)
+        spi6_est     = round(SPI6_BASE[mes_sel] + delta_spi * 0.8, 3)
+        pago_pct     = pago_hibrido(spi9_est, spi6_est)
+        pago_cop     = round(pago_pct * SUMA_HA * HECTAREAS, 0)
+        activa9      = spi9_est <= U9_OPT
+        activa6      = spi6_est <= U6_OPT
+        seguro_activa= activa9 and activa6
 
-    st.info(f"**Fórmula:** Pago = A(SPI-9) × P(SPI-6)  →  **{pago_pct:.1%}**\n\n"
-            f"SPI-9 activa el evento · SPI-6 modula la severidad\n\n"
-            f"Condición: **{nivel}**")
+        # ── CARDS DE RESULTADO ────────────────────────────────
+        st.markdown(
+            f"#### Resultado · {MESES[mes_sel]} · "
+            f"{lluvia_sel.lower()} · {vigor_sel.lower()}"
+        )
 
-st.divider()
+        r1, r2, r3 = st.columns(3)
 
-# ════════════════════════════════════════════════════════════
-# HISTORIAL + TABLA
-# ════════════════════════════════════════════════════════════
-st.markdown("**Historial de activaciones**")
+        r1.metric(
+            "Producción estimada",
+            f"{prod_est:.0f} mil sacos",
+            delta=f"{diff_pct:+.1f}% vs. promedio de {MESES[mes_sel]}",
+            delta_color="normal" if diff_pct >= 0 else "inverse",
+        )
+        r1.caption(f"Promedio histórico {MESES[mes_sel]}: {prod_hist:.0f} mil sacos")
 
-rango_h = st.select_slider(
-    "Rango historial", label_visibility="collapsed",
-    options=list(range(yr_min, yr_max + 1)),
-    value=(max(yr_min, anio_sel - 5), min(yr_max, anio_sel + 1)))
+        if seguro_activa:
+            r2.metric("¿El seguro paga?", "Sí activa",
+                      delta=f"SPI-9 = {spi9_est:+.2f}")
+            r2.success("El clima supera el umbral del seguro.")
+        else:
+            r2.metric("¿El seguro paga?", "No activa",
+                      delta=f"SPI-9 = {spi9_est:+.2f}", delta_color="off")
+            r2.info("El clima no supera el umbral del seguro.")
 
-dh = df[(df['fecha'].dt.year >= rango_h[0]) &
-        (df['fecha'].dt.year <= rango_h[1])].copy()
+        r3.metric(
+            "Pago estimado",
+            fmt_cop(pago_cop) if pago_cop > 0 else "$0",
+            delta=f"{pago_pct:.1%} de la suma asegurada" if pago_cop > 0 else "Sin pago",
+            delta_color="normal" if pago_cop > 0 else "off",
+        )
+        r3.caption(f"Suma asegurada máxima: {fmt_cop(SUMA_HA * HECTAREAS)}")
 
-def clf(row):
-    p = row['pago_spi_mejor'] > 0
-    s = row['evento_sequia_conocido'] == 1
-    if p and s:       return 'Pagó',            VERDE_P
-    if p and not s:   return 'Falso positivo',  AMBAR
-    if not p and s:   return 'Pérdida sin pago','#E67E22'
-    return 'Normal',  '#CBD5C0'
+        st.divider()
 
-dh['est_h'], dh['col_h'] = zip(*dh.apply(clf, axis=1))
-dh['altura'] = dh['pago_spi_mejor'].clip(lower=0.08)
-sel_f = pd.Timestamp(year=anio_sel, month=mes_sel, day=1)
+        # ── MENSAJE EN LENGUAJE LLANO ─────────────────────────
+        mes_nom = MESES[mes_sel]
+        if seguro_activa and diff_pct < 0:
+            st.success(
+                f"Con **{lluvia_sel.lower()}** y **{vigor_sel.lower()}** en {mes_nom}, "
+                f"la producción estimada de Caldas estaría "
+                f"**{abs(diff_pct):.1f}% por debajo** del promedio histórico. "
+                f"La sequía acumulada **activa el seguro** y recibiría un pago de "
+                f"**{fmt_cop(pago_cop)}**."
+            )
+        elif seguro_activa and diff_pct >= 0:
+            st.warning(
+                f"Con **{lluvia_sel.lower()}** en {mes_nom}, el seguro activaría "
+                f"(**{fmt_cop(pago_cop)}**), aunque la producción estimada no muestra "
+                f"caída significativa. Esto ocurre cuando la sequía es acumulada "
+                f"pero aún no impacta la cosecha."
+            )
+        elif not seguro_activa and diff_pct < -10:
+            st.warning(
+                f"La producción estimada estaría **{abs(diff_pct):.1f}% por debajo** "
+                f"del promedio de {mes_nom}, pero la lluvia acumulada "
+                f"**no supera el umbral del seguro**. "
+                f"En este escenario no habría pago aunque haya caída productiva."
+            )
+        else:
+            st.info(
+                f"Con **{lluvia_sel.lower()}** y **{vigor_sel.lower()}** en {mes_nom}, "
+                f"las condiciones están dentro de lo normal. "
+                f"Producción estimada: **{prod_est:.0f} mil sacos**. "
+                f"El seguro **no se activaría** este mes."
+            )
 
-figh = go.Figure()
-for est, col in [('Pagó', VERDE_P), ('Falso positivo', AMBAR),
-                 ('Pérdida sin pago', '#E67E22'), ('Normal', '#CBD5C0')]:
-    sub = dh[dh['est_h'] == est]
-    if sub.empty: continue
-    figh.add_trace(go.Bar(
-        x=sub['fecha'], y=sub['altura'],
-        name=est, marker_color=col, marker_line_width=0,
-        customdata=sub['pago_spi_mejor'],
-        hovertemplate='%{x|%b %Y}<br>Pago: <b>%{customdata:.1%}</b>'
-                      '<extra>' + est + '</extra>'))
+        st.divider()
 
-sel_h = dh[dh['fecha'] == sel_f]
-if not sel_h.empty:
-    figh.add_trace(go.Bar(
-        x=sel_h['fecha'], y=sel_h['altura'],
-        marker=dict(color='rgba(0,0,0,0)', line=dict(color='#1A3A2A', width=2.5)),
-        showlegend=False, hoverinfo='skip'))
+        # ── CHIPS SPI ─────────────────────────────────────────
+        st.markdown("**Condición de lluvia acumulada (referencia)**")
+        cs1, cs2 = st.columns(2)
+        cs1.metric(
+            f"9 meses acumulados {'✅' if activa9 else '⬜'}",
+            f"{spi9_est:+.2f}",
+            delta="Activa el seguro" if activa9 else f"Umbral: {U9_OPT}",
+            delta_color="inverse" if activa9 else "off",
+        )
+        cs2.metric(
+            f"6 meses acumulados {'✅' if activa6 and activa9 else '⬜'}",
+            f"{spi6_est:+.2f}",
+            delta="Determina el pago" if (activa9 and activa6) else f"Umbral: {U6_OPT}",
+            delta_color="inverse" if (activa9 and activa6) else "off",
+        )
+        st.caption(
+            "Estimación basada en el promedio histórico del mes ajustado "
+            "por el nivel de lluvia seleccionado. No son mediciones en tiempo real."
+        )
 
-figh.update_layout(
-    barmode='overlay', height=150,
-    margin=dict(l=0, r=0, t=4, b=0),
-    plot_bgcolor='white', paper_bgcolor='white',
-    legend=dict(orientation='h', yanchor='bottom', y=1.02, x=0, font=dict(size=10)),
-    xaxis=dict(showgrid=False, tickformat='%Y', dtick='M12'),
-    yaxis=dict(showticklabels=False, range=[0, 1.15]),
-    bargap=0.15, font=dict(size=10))
-st.plotly_chart(figh, use_container_width=True)
+        st.divider()
 
-# ── TABLA DETALLE ─────────────────────────────────────────────
-st.markdown("**Detalle por periodo · últimos 6 meses**")
-tabla = df[df['fecha'] <= sel_f].tail(6).copy()
-tabla['Estado']    = tabla.apply(lambda r: clf(r)[0], axis=1)
-tabla['% Pago']    = tabla['pago_spi_mejor'].map(lambda x: f"{x:.1%}")
-tabla['Var. obs.'] = tabla['var_obs'].map(lambda x: f"{x:+.1f}%")
-tabla['Pago COP']  = tabla['pago_cop'].map(lambda x: fmt_cop(x) if x > 0 else "—")
-tabla['SPI-9']     = tabla['spi_9'].map(lambda x: f"{x:.3f}")
-tabla['SPI-6']     = tabla['spi_6'].map(lambda x: f"{x:.3f}")
-tabla['Mes']       = tabla['fecha'].dt.strftime('%b %Y')
+        # ── CONTEXTO HISTÓRICO ────────────────────────────────
+        st.markdown(f"**Producción histórica de {MESES[mes_sel]} en Caldas según lluvia**")
+        st.caption("Promedio 2002–2023 · miles de sacos de 60 kg")
 
-st.dataframe(
-    tabla[['Mes', 'SPI-9', 'SPI-6', 'Estado', '% Pago', 'Var. obs.', 'Pago COP']],
-    use_container_width=True, hide_index=True,
-    column_config={
-        "Mes"      : st.column_config.TextColumn("Mes",       width="small"),
-        "SPI-9"    : st.column_config.TextColumn("SPI-9",     width="small"),
-        "SPI-6"    : st.column_config.TextColumn("SPI-6",     width="small"),
-        "Estado"   : st.column_config.TextColumn("Estado",    width="medium"),
-        "% Pago"   : st.column_config.TextColumn("% Pago",    width="small"),
-        "Var. obs.": st.column_config.TextColumn("Var. obs.", width="small"),
-        "Pago COP" : st.column_config.TextColumn("Pago COP",  width="small"),
-    })
-st.caption(f"▶ mes seleccionado: {sel_f.strftime('%b %Y')}  ·  {len(df)} periodos disponibles")
-st.divider()
+        prod_b, prod_n, prod_a = PROD_POR_LLUVIA[mes_sel]
+        colores = [
+            ROJO    if ll_idx == 0 else "#CBD5C0",
+            VERDE_M if ll_idx == 1 else "#CBD5C0",
+            AMBAR   if ll_idx == 2 else "#CBD5C0",
+        ]
+        fig_b = go.Figure(go.Bar(
+            x=["Poca lluvia", "Lluvia normal", "Mucha lluvia"],
+            y=[prod_b, prod_n, prod_a],
+            marker_color=colores,
+            text=[f"{v:.0f}" for v in [prod_b, prod_n, prod_a]],
+            textposition='outside',
+            hovertemplate='%{x}<br>Promedio: <b>%{y:.0f}</b> mil sacos<extra></extra>',
+        ))
+        fig_b.add_hline(
+            y=prod_hist,
+            line=dict(color=GRIS, width=1.5, dash='dot'),
+            annotation_text=f"Promedio general: {prod_hist:.0f}",
+            annotation_position="right",
+            annotation_font_size=10,
+        )
+        fig_b.update_layout(
+            height=200, margin=dict(l=0, r=80, t=20, b=0),
+            plot_bgcolor='white', paper_bgcolor='white',
+            xaxis=dict(showgrid=False),
+            yaxis=dict(title='Miles de sacos', gridcolor='#E8EDE9',
+                       range=[0, max(prod_b, prod_n, prod_a, prod_hist) * 1.25]),
+            showlegend=False, font=dict(size=11),
+        )
+        st.plotly_chart(fig_b, use_container_width=True)
 
-# ════════════════════════════════════════════════════════════
-# SECCIÓN 4 + 5
-# ════════════════════════════════════════════════════════════
-col_ev, col_sim = st.columns([5, 5])
-
-with col_ev:
-    st.markdown("**4. Evaluación histórica (2015–2023)**")
-    dev = df[(df['fecha'].dt.year >= 2015) & (df['fecha'].dt.year <= 2023)].copy()
-    pa  = dev['pago_spi_mejor'] > 0
-    sq  = dev['evento_sequia_conocido'] == 1
-    tot = len(dev)
-    cor = int(((pa & sq) | (~pa & ~sq)).sum())
-    fp  = int((pa  & ~sq).sum())
-    fn  = int((~pa & sq).sum())
-    pr  = cor / (cor + fp) if (cor + fp) > 0 else 0
-    rc  = cor / (cor + fn) if (cor + fn) > 0 else 0
-    f2  = (5 * pr * rc) / (4 * pr + rc) if (pr + rc) > 0 else 0
-
-    fig_d = go.Figure(go.Pie(
-        labels=['Correctos', 'Falsos positivos', 'Falsos negativos'],
-        values=[cor, fp, fn], hole=0.55,
-        marker=dict(colors=[VERDE_P, AMBAR, ROJO],
-                    line=dict(color='white', width=2)),
-        textinfo='percent', textfont=dict(size=12),
-        hovertemplate='<b>%{label}</b><br>%{value} meses (%{percent})<extra></extra>'))
-    fig_d.add_annotation(
-        text=f'<b>{tot}</b><br>meses',
-        x=0.5, y=0.5, showarrow=False,
-        font=dict(size=14, color='#1A3A2A'), align='center')
-    fig_d.update_layout(
-        height=220, margin=dict(l=0, r=0, t=4, b=0),
-        paper_bgcolor='white', showlegend=True,
-        legend=dict(orientation='v', x=1.0, y=0.5, font=dict(size=10)))
-    st.plotly_chart(fig_d, use_container_width=True)
-
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Correctos",   f"{cor/tot*100:.1f}%", f"{cor} meses")
-    m2.metric("Falsos neg.", f"{fn/tot*100:.1f}%",  f"{fn} meses", delta_color="inverse")
-    m3.metric("F2-score",    f"{f2:.3f}",            "híbrido")
-
-    pt    = (dev['spi_9'] <= -1.0) & (dev['spi_6'] <= -1.0)
-    cor_t = int(((pt & sq) | (~pt & ~sq)).sum())
-    fp_t  = int((pt  & ~sq).sum())
-    fn_t  = int((~pt & sq).sum())
-    pr_t  = cor_t / (cor_t + fp_t) if (cor_t + fp_t) > 0 else 0
-    rc_t  = cor_t / (cor_t + fn_t) if (cor_t + fn_t) > 0 else 0
-    f2_t  = (5 * pr_t * rc_t) / (4 * pr_t + rc_t) if (pr_t + rc_t) > 0 else 0
-    d_cor = (cor - cor_t) / tot * 100
-    d_fn  = (fn  - fn_t)  / tot * 100
-
-    st.success(f"**Mejora vs. SPI-9 ≤ −1.0 (tradicional):**\n\n"
-               f"+{d_cor:.1f} pp en correctos  ·  "
-               f"{d_fn:+.1f} pp en FN  ·  "
-               f"F2: {f2_t:.3f} → **{f2:.3f}**")
-    st.caption("FN = sequía real sin pago — el caso más crítico. Por eso se usa F2.")
-
-with col_sim:
-    st.markdown("**5. Simulador de diseño del seguro**")
-
-    # Checkbox para restaurar → evita el botón que falla en localtunnel
-    usar_optimos = st.checkbox("Usar umbrales calibrados óptimos", value=True)
-
-    if usar_optimos:
-        u9_val, u6_val = U9_OPT, U6_OPT
-        st.caption(f"Umbrales óptimos activos: SPI-9 = {U9_OPT}  ·  SPI-6 = {U6_OPT}")
-        u9 = st.slider("Umbral activación (SPI-9)", -1.5, -0.2,
-                       U9_OPT, 0.05, disabled=True,
-                       help=f"Calibrado óptimo: {U9_OPT}")
-        u6 = st.slider("Umbral intensidad (SPI-6)", -1.5, 0.5,
-                       U6_OPT, 0.05, disabled=True,
-                       help=f"Calibrado óptimo: {U6_OPT}")
-    else:
-        u9 = st.slider("Umbral activación (SPI-9)", -1.5, -0.2,
-                       U9_OPT, 0.05,
-                       help=f"Calibrado óptimo: {U9_OPT}")
-        u6 = st.slider("Umbral intensidad (SPI-6)", -1.5, 0.5,
-                       U6_OPT, 0.05,
-                       help=f"Calibrado óptimo: {U6_OPT}")
-        u9_val, u6_val = u9, u6
-
-    dsim = dev.copy()
-    dsim['ps'] = dsim.apply(
-        lambda r: pago_hibrido(r['spi_9'], r['spi_6'], u9_val, u6_val), axis=1)
-    pas  = dsim['ps'] > 0
-    acts = int(pas.sum())
-    cors = int(((pas & sq) | (~pas & ~sq)).sum())
-    fps  = int((pas  & ~sq).sum())
-    fns  = int((~pas & sq).sum())
-    tseq = int(sq.sum())
-    cobs = (pas & sq).sum() / tseq * 100 if tseq > 0 else 0
-    prs  = cors / (cors + fps) if (cors + fps) > 0 else 0
-    rcs  = cors / (cors + fns) if (cors + fns) > 0 else 0
-    f2s  = (5 * prs * rcs) / (4 * prs + rcs) if (prs + rcs) > 0 else 0
-    cob_ref = (pa & sq).sum() / tseq * 100 if tseq > 0 else 0
-
-    ks1, ks2 = st.columns(2)
-    ks3, ks4 = st.columns(2)
-    ks1.metric("Activaciones",     f"{acts}",
-               f"{acts - int(pa.sum()):+d} vs óptimo")
-    ks2.metric("Cobertura",        f"{cobs:.1f}%",
-               f"{cobs - cob_ref:+.1f} pp")
-    ks3.metric("Falsos positivos", f"{fps/tot*100:.1f}%",
-               f"{fps/tot*100 - fp/tot*100:+.1f} pp", delta_color="inverse")
-    ks4.metric("Falsos negativos", f"{fns/tot*100:.1f}%",
-               f"{fns/tot*100 - fn/tot*100:+.1f} pp", delta_color="inverse")
-
-    if f2s >= f2:
-        st.success(f"**F2 = {f2s:.3f}** ≥ referencia óptima ({f2:.3f}) ✅")
-    else:
-        st.warning(f"**F2 = {f2s:.3f}** < referencia óptima ({f2:.3f}) "
-                   f"— los umbrales reducen el desempeño.")
-    st.caption(f"Deltas vs umbrales calibrados: SPI-9 = {U9_OPT}  /  SPI-6 = {U6_OPT}")
 
 # ════════════════════════════════════════════════════════════
-# FOOTER
+# PESTAÑA 2 — HISTORIAL
 # ════════════════════════════════════════════════════════════
+with tab2:
+
+    anios = sorted(df['fecha'].dt.year.unique())
+    col_sb, col_main = st.columns([1, 3], gap="large")
+
+    with col_sb:
+        st.markdown("#### Filtros")
+        anio_sel = st.selectbox("Año", anios, index=anios.index(2020))
+        meses_d  = sorted(df[df['fecha'].dt.year==anio_sel]['fecha'].dt.month.unique())
+        mes_h    = st.selectbox("Mes", meses_d,
+                                format_func=lambda m: MESES[m],
+                                index=min(3, len(meses_d)-1))
+        st.divider()
+        ult = df.dropna(subset=['spi_9']).iloc[-1]
+        st.markdown(f"**Condición actual · {ult['fecha'].strftime('%b %Y')}**")
+        st.metric("SPI-9", f"{ult['spi_9']:+.2f}", ult['cat_oficial_spi_9'])
+        st.divider()
+        st.markdown("**Contrato de referencia**")
+        st.markdown("Suma asegurada / ha: **$1.8 M COP**")
+        st.markdown("Prima estimada: **$42 k / mes**")
+        st.caption("Fuente: FNC · CHIRPS · NASA MODIS\nModelo: Random Forest M4")
+
+    with col_main:
+        fila = df[(df['fecha'].dt.year==anio_sel)&(df['fecha'].dt.month==mes_h)]
+        if fila.empty:
+            st.warning("Sin datos para el mes seleccionado.")
+            st.stop()
+
+        r          = fila.iloc[0]
+        pago_pct_h = float(r['pago_spi_mejor'])
+        prod_real  = float(r['prod_caldas_miles_sacos'])
+        var_obs    = float(r['var_obs'])
+        spi9_h     = float(r['spi_9'])
+        pago_cop_h = float(r['pago_cop'])
+        nivel_h    = str(r['cat_oficial_spi_9'])
+        sequia_h   = int(r['evento_sequia_conocido'])
+
+        if pago_pct_h > 0 and sequia_h == 1:
+            est_txt, est_fn = "✅ El seguro pagó", st.success
+        elif pago_pct_h > 0 and sequia_h == 0:
+            est_txt, est_fn = "⚠️ Pagó sin sequía confirmada", st.warning
+        elif pago_pct_h == 0 and sequia_h == 1:
+            est_txt, est_fn = "🚨 Hubo sequía pero no pagó", st.error
+        else:
+            est_txt, est_fn = "⬜ Mes sin novedad", st.info
+
+        st.markdown(f"**{MESES[mes_h]} {anio_sel} — {est_txt}**")
+
+        h1, h2, h3 = st.columns(3)
+        h1.metric("Producción real", f"{prod_real:.0f} mil sacos",
+                  delta=f"{var_obs:+.1f}% vs. promedio",
+                  delta_color="normal" if var_obs >= 0 else "inverse")
+        h2.metric("Pago del seguro",
+                  fmt_cop(pago_cop_h) if pago_cop_h > 0 else "$0",
+                  delta=f"{pago_pct_h:.1%} de la suma asegurada" if pago_pct_h > 0 else "No activó",
+                  delta_color="normal" if pago_pct_h > 0 else "off")
+        h3.metric("Lluvia acumulada (SPI-9)", f"{spi9_h:+.3f}", nivel_h)
+
+        est_fn(
+            f"Producción real: **{prod_real:.0f} mil sacos** "
+            f"({'por debajo' if var_obs < 0 else 'por encima'} del promedio "
+            f"de {MESES[mes_h]} en {abs(var_obs):.1f}%). "
+            f"{'El seguro activó con un pago de **' + fmt_cop(pago_cop_h) + '**.' if pago_cop_h > 0 else 'El seguro no activó este mes.'}"
+        )
+
+        st.divider()
+
+        # Gráfica
+        st.markdown("**Producción observada vs. esperada · Caldas**")
+        yr_min = int(df['fecha'].dt.year.min())
+        yr_max = int(df['fecha'].dt.year.max())
+        rango = st.select_slider(
+            "Periodo", label_visibility="collapsed",
+            options=list(range(yr_min, yr_max+1)),
+            value=(max(yr_min, anio_sel-4), min(yr_max, anio_sel+2)),
+        )
+        dg = df[(df['fecha'].dt.year >= rango[0]) &
+                (df['fecha'].dt.year <= rango[1])].dropna(subset=['prod_estimada_rf']).copy()
+
+        fig = go.Figure()
+        dg['caida'] = dg['prod_caldas_miles_sacos'] < dg['prod_estimada_rf']
+        grp = (dg['caida'] != dg['caida'].shift()).cumsum()
+        for _, b in dg[dg['caida']].groupby(grp[dg['caida']]):
+            fig.add_trace(go.Scatter(
+                x=list(b['fecha'])+list(b['fecha'][::-1]),
+                y=list(b['prod_estimada_rf'])+list(b['prod_caldas_miles_sacos'][::-1]),
+                fill='toself', fillcolor='rgba(192,57,43,0.10)',
+                line=dict(width=0), showlegend=False, hoverinfo='skip'))
+        fig.add_trace(go.Scatter(x=dg['fecha'], y=dg['prod_estimada_rf'],
+            name='Esperada (RF)', line=dict(color=VERDE_M, width=2, dash='dash'),
+            hovertemplate='%{x|%b %Y}<br>Esperada: <b>%{y:.1f}</b> mil sacos<extra></extra>'))
+        fig.add_trace(go.Scatter(x=dg['fecha'], y=dg['prod_caldas_miles_sacos'],
+            name='Real', line=dict(color=ROJO, width=2),
+            hovertemplate='%{x|%b %Y}<br>Real: <b>%{y:.1f}</b> mil sacos<extra></extra>'))
+        sv = dg[(dg['fecha'].dt.year==anio_sel)&(dg['fecha'].dt.month==mes_h)]
+        if not sv.empty:
+            s = sv.iloc[0]
+            fig.add_trace(go.Scatter(x=[s['fecha']], y=[s['prod_caldas_miles_sacos']],
+                mode='markers', marker=dict(color=ROJO, size=12, line=dict(color='white',width=2)),
+                name='Mes seleccionado'))
+            fig.add_vline(x=s['fecha'].timestamp()*1000,
+                          line=dict(color=GRIS, width=1, dash='dot'))
+        fig.update_layout(height=250, margin=dict(l=0,r=0,t=4,b=0),
+            plot_bgcolor='white', paper_bgcolor='white',
+            legend=dict(orientation='h',yanchor='bottom',y=1.02,x=0,font=dict(size=10)),
+            xaxis=dict(showgrid=False,tickformat='%Y'),
+            yaxis=dict(title='Miles de sacos',gridcolor='#E8EDE9'),
+            hovermode='x unified', font=dict(size=11))
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.warning(
+            "⚠️ Las caídas de producción por exceso de lluvia (SPI positivo) no activan "
+            "el seguro — limitación documentada del índice SPI para el café en Caldas."
+        )
+
+        st.divider()
+
+        # Tabla detalle
+        st.markdown("**Últimos 6 meses**")
+        sel_f = pd.Timestamp(year=anio_sel, month=mes_h, day=1)
+        tabla = df[df['fecha'] <= sel_f].tail(6).copy()
+
+        def clf(row):
+            p = row['pago_spi_mejor'] > 0
+            s = row['evento_sequia_conocido'] == 1
+            if p and s:       return 'Pagó'
+            if p and not s:   return 'Falso positivo'
+            if not p and s:   return 'Pérdida sin pago'
+            return 'Normal'
+
+        tabla['Estado']     = tabla.apply(clf, axis=1)
+        tabla['% Pago']     = tabla['pago_spi_mejor'].map(lambda x: f"{x:.1%}")
+        tabla['Var. prod.'] = tabla['var_obs'].map(lambda x: f"{x:+.1f}%")
+        tabla['Pago COP']   = tabla['pago_cop'].map(lambda x: fmt_cop(x) if x > 0 else "—")
+        tabla['SPI-9']      = tabla['spi_9'].map(lambda x: f"{x:.3f}")
+        tabla['Mes']        = tabla['fecha'].dt.strftime('%b %Y')
+
+        st.dataframe(
+            tabla[['Mes','SPI-9','Estado','% Pago','Var. prod.','Pago COP']],
+            use_container_width=True, hide_index=True,
+            column_config={
+                "Mes"       : st.column_config.TextColumn("Mes",        width="small"),
+                "SPI-9"     : st.column_config.TextColumn("SPI-9",      width="small"),
+                "Estado"    : st.column_config.TextColumn("Estado",     width="medium"),
+                "% Pago"    : st.column_config.TextColumn("% Pago",     width="small"),
+                "Var. prod.": st.column_config.TextColumn("Var. prod.", width="small"),
+                "Pago COP"  : st.column_config.TextColumn("Pago COP",   width="small"),
+            })
+
+# ── FOOTER ────────────────────────────────────────────────────
 st.divider()
 st.caption(
-    "Prototipo: Random Forest M4 + esquema híbrido SPI-9/SPI-6  |  "
-    "Grupo 16 · MIAD · Universidad de los Andes · Mayo 2026  |  "
+    "Café Seguro · Prototipo académico · Grupo 16 · MIAD · Universidad de los Andes · Mayo 2026  |  "
+    "Modelo: Random Forest M4 · Esquema híbrido SPI-9/SPI-6  |  "
     f"Fuentes: FNC · CHIRPS · NASA MODIS  |  "
-    f"Última actualización: {df['fecha'].max().strftime('%b %Y')}"
+    f"Datos hasta: {df['fecha'].max().strftime('%b %Y')}"
 )
